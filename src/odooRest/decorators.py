@@ -90,34 +90,60 @@ def odoo_auth(odoo_url, odoo_db):
         return wrapper
     return decorator
 
-
 def odoo_method(model, method):
     def decorator(func):
-        @functools.wraps(func)
-        def wrapper(self, request, *args, **kwargs):
-            if UniversalConnector.is_django():
-                # Django logic
-                odoo_session = UniversalConnector.get_session(request)
+        if DJANGO_ENVIRONMENT:
+            @functools.wraps(func)
+            def wrapper(self,request,*args, **kwargs):
+                if UniversalConnector.is_django():
+                    # Django logic remains the same as you already have it.
+                    odoo_session = UniversalConnector.get_session(request)
+                    if not odoo_session:
+                        return UniversalConnector.get_response({"error": "Odoo session not provided."}, status=401)
 
-                if not odoo_session:
-                    return UniversalConnector.get_response({"error": "Odoo session not provided."}, status=401)
+                    request.odoo_session = odoo_session
 
-                request.odoo_session = odoo_session
+                    additional_params = func(self, request, *args, **kwargs)
+                    params = {**additional_params, **kwargs}
 
-                additional_params = func(self, request, *args, **kwargs)
-                params = {**additional_params, **kwargs}
+                    result = call_odoo(
+                        odoo_session, params['base_url'], model, method, params)
 
-                result = call_odoo(
-                    odoo_session, params['base_url'], model, method, params)
-
-                if isinstance(result, dict):
-                    return UniversalConnector.get_response(result)
-                return JsonResponse(result, safe=False)
-            else:
+                    if isinstance(result, dict):
+                        return UniversalConnector.get_response(result)
+                    return JsonResponse(result, safe=False)
+            return wrapper
+        else:
+     
+            @functools.wraps(func)
+            def wrapper(self, *args, **kwargs):
                 # Odoo logic
-                return func(self, request, *args, **kwargs)
+                    # Call the original function to get additional params
+                    additional_params = func(self, *args, **kwargs)
+                    params = {**additional_params, **kwargs}
+                    
+                    # Handle standard Odoo methods (create, write, unlink, search_read)
+                    if method == 'create':
+                        result = request.env[model].sudo().create(params)
+                    elif method == 'write':
+                        result = request.env[model].sudo().browse(params.get('ids')).write(params.get('values'))
+                    elif method == 'unlink':
+                        result = request.env[model].sudo().browse(params.get('ids')).unlink()
+                    elif method == 'search_read':
+                        result = request.env[model].sudo().search_read(
+                            domain=params.get('domain', []),
+                            fields=params.get('fields', []),
+                            limit=params.get('limit', None)
+                        )
+                    else:
+                        # Handle custom method calls dynamically
+                        result = getattr(request.env[model].sudo(), method)(**params)
 
-        return wrapper
+                    
+                    # Return the result as JSON response
+                    return request.make_response(json.dumps(result), headers={'Content-Type': 'application/json'})
+            return wrapper
+           
     return decorator
 
 # common methods for odoo restful
@@ -126,20 +152,3 @@ create = functools.partial(odoo_method, method='create')
 write = functools.partial(odoo_method, method='write')
 unlink = functools.partial(odoo_method, method='unlink')
 
-# # Common methods for both environments
-
-
-# def search_read(model, call_type=None):
-#     return odoo_method(model, method='search_read', call_type=call_type)
-
-
-# def create(model, call_type=None):
-#     return odoo_method(model, method='create', call_type=call_type)
-
-
-# def write(model, call_type=None):
-#     return odoo_method(model, method='write', call_type=call_type)
-
-
-# def unlink(model, call_type=None):
-#     return odoo_method(model, method='unlink', call_type=call_type)
