@@ -90,35 +90,42 @@ def odoo_auth(odoo_url, odoo_db):
         return wrapper
     return decorator
 
+import functools
+import json
+from odoo.http import request
+from odoo.exceptions import UserError, ValidationError, AccessError
+
 def odoo_method(model, method):
     def decorator(func):
         if DJANGO_ENVIRONMENT:
             @functools.wraps(func)
-            def wrapper(self,request,*args, **kwargs):
-                if UniversalConnector.is_django():
-                    # Django logic remains the same as you already have it.
-                    odoo_session = UniversalConnector.get_session(request)
-                    if not odoo_session:
-                        return UniversalConnector.get_response({"error": "Odoo session not provided."}, status=401)
+            def wrapper(self, request, *args, **kwargs):
+                try:
+                    if UniversalConnector.is_django():
+                        odoo_session = UniversalConnector.get_session(request)
+                        if not odoo_session:
+                            return UniversalConnector.get_response({"error": "Odoo session not provided."}, status=401)
 
-                    request.odoo_session = odoo_session
+                        request.odoo_session = odoo_session
 
-                    additional_params = func(self, request, *args, **kwargs)
-                    params = {**additional_params, **kwargs}
+                        additional_params = func(self, request, *args, **kwargs)
+                        params = {**additional_params, **kwargs}
 
-                    result = call_odoo(
-                        odoo_session, params['base_url'], model, method, params)
+                        result = call_odoo(
+                            odoo_session, params['base_url'], model, method, params)
 
-                    if isinstance(result, dict):
-                        return UniversalConnector.get_response(result)
-                    return JsonResponse(result, safe=False)
+                        if isinstance(result, dict):
+                            return UniversalConnector.get_response(result)
+                        return JsonResponse(result, safe=False)
+                except Exception as e:
+                    error_message = str(e)
+                    return UniversalConnector.get_response({"error": error_message}, status=500)
             return wrapper
         else:
-     
             @functools.wraps(func)
             def wrapper(self, *args, **kwargs):
-                # Odoo logic
-                    # Call the original function to get additional params
+                try:
+                    # Odoo logic
                     additional_params = func(self, *args, **kwargs)
                     params = {**additional_params, **kwargs}
                     
@@ -139,11 +146,14 @@ def odoo_method(model, method):
                         # Handle custom method calls dynamically
                         result = getattr(request.env[model].sudo(), method)(**params)
 
-                    
-                    # Return the result as JSON response
                     return request.make_response(json.dumps(result), headers={'Content-Type': 'application/json'})
+                except (UserError, ValidationError, AccessError) as e:
+                    error_message = str(e)
+                    return request.make_response(json.dumps({"error": error_message}), headers={'Content-Type': 'application/json'}, status=400)
+                except Exception as e:
+                    error_message = str(e)
+                    return request.make_response(json.dumps({"error": "An unexpected error occurred."}), headers={'Content-Type': 'application/json'}, status=500)
             return wrapper
-           
     return decorator
 
 # common methods for odoo restful
