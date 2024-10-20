@@ -1,5 +1,6 @@
 import functools
 import json
+import base64
 
 try:
     # Django imports
@@ -104,57 +105,99 @@ def odoo_method(model, method):
                     if UniversalConnector.is_django():
                         odoo_session = UniversalConnector.get_session(request)
                         if not odoo_session:
-                            return UniversalConnector.get_response({"error": "Odoo session not provided."}, status=401)
+                            return UniversalConnector.get_response(
+                                {"error": "Odoo session not provided."}, status=401
+                            )
 
                         request.odoo_session = odoo_session
 
+                        # Execute the wrapped function to get additional params
                         additional_params = func(self, request, *args, **kwargs)
                         params = {**additional_params, **kwargs}
 
                         result = call_odoo(
-                            odoo_session, params['base_url'], model, method, params)
+                            odoo_session, params['base_url'], model, method, params
+                        )
 
+                        # Dynamically handle images if any are present in the response
                         if isinstance(result, dict):
+                            result = handle_images_in_result(result, params.get('fields', []))
                             return UniversalConnector.get_response(result)
+
                         return JsonResponse(result, safe=False)
                 except Exception as e:
                     error_message = str(e)
-                    return UniversalConnector.get_response({"error": error_message}, status=500)
+                    return UniversalConnector.get_response(
+                        {"error": error_message}, status=500
+                    )
             return wrapper
         else:
             @functools.wraps(func)
             def wrapper(self, *args, **kwargs):
                 try:
-                    # Odoo logic
+                    # Execute the wrapped function to get additional params
                     additional_params = func(self, *args, **kwargs)
                     params = {**additional_params, **kwargs}
-                    
+
                     # Handle standard Odoo methods (create, write, unlink, search_read)
                     if method == 'create':
                         result = request.env[model].sudo().create(params)
                     elif method == 'write':
-                        result = request.env[model].sudo().browse(params.get('ids')).write(params.get('values'))
+                        result = request.env[model].sudo().browse(
+                            params.get('ids')
+                        ).write(params.get('values'))
                     elif method == 'unlink':
-                        result = request.env[model].sudo().browse(params.get('ids')).unlink()
+                        result = request.env[model].sudo().browse(
+                            params.get('ids')
+                        ).unlink()
                     elif method == 'search_read':
                         result = request.env[model].sudo().search_read(
                             domain=params.get('domain', []),
                             fields=params.get('fields', []),
                             limit=params.get('limit', None)
                         )
+                        # Dynamically handle images in the result
+                        result = handle_images_in_result(result, params.get('fields', []))
                     else:
                         # Handle custom method calls dynamically
                         result = getattr(request.env[model].sudo(), method)(**params)
 
-                    return request.make_response(json.dumps(result), headers={'Content-Type': 'application/json'})
+                    return request.make_response(
+                        json.dumps(result), headers={'Content-Type': 'application/json'}
+                    )
                 except (UserError, ValidationError, AccessError) as e:
                     error_message = str(e)
-                    return request.make_response(json.dumps({"error": error_message}), headers={'Content-Type': 'application/json'}, status=400)
+                    return request.make_response(
+                        json.dumps({"error": error_message}),
+                        headers={'Content-Type': 'application/json'},
+                        status=400
+                    )
                 except Exception as e:
                     error_message = str(e)
-                    return request.make_response(json.dumps({"error": "An unexpected error occurred."}), headers={'Content-Type': 'application/json'}, status=500)
+                    return request.make_response(
+                        json.dumps({"error": "An unexpected error occurred."}),
+                        headers={'Content-Type': 'application/json'},
+                        status=500
+                    )
             return wrapper
     return decorator
+
+def handle_images_in_result(result, fields):
+    """
+    Encodes any image fields (like 'image_1920') in Base64, if those fields are present.
+    """
+    if isinstance(result, dict):
+        result = [result]  # Ensure result is iterable
+
+    image_fields = [field for field in fields if 'image' in field]
+
+    for record in result:
+        for field in image_fields:
+            if field in record and record[field]:
+                # Convert binary image data to Base64 string
+                record[field] = base64.b64encode(record[field]).decode('utf-8')
+
+    return result
 
 # common methods for odoo restful
 search_read = functools.partial(odoo_method, method='search_read')
