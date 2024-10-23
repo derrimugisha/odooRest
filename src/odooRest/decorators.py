@@ -156,6 +156,10 @@ def odoo_method(model, method):
                             fields=params.get('fields', []),
                             limit=params.get('limit', None)
                         )
+                    elif method == 'read':
+                        result = request.env[model].sudo().browse(
+                            params.get('ids')
+                        ).read(params.get('fields', []))
                         # Dynamically handle images in the result
                         result = handle_images_in_result(result, params.get('fields', []))
                     else:
@@ -204,4 +208,5 @@ search_read = functools.partial(odoo_method, method='search_read')
 create = functools.partial(odoo_method, method='create')
 write = functools.partial(odoo_method, method='write')
 unlink = functools.partial(odoo_method, method='unlink')
+read = functools.partial(odoo_method, method='read')
 
