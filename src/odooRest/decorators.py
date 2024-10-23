@@ -122,9 +122,20 @@ def odoo_method(model, method):
                         # Dynamically handle images if any are present in the response
                         if isinstance(result, dict):
                             result = handle_images_in_result(result, params.get('fields', []))
-                            return UniversalConnector.get_response(result)
-
-                        return JsonResponse(result, safe=False)
+                            # return UniversalConnector.get_response(result)
+                        
+                        # Apply the after_execution function if provided
+                        after_execution = params.get('after_execution')
+                        if callable(after_execution):
+                            result = after_execution(result, params)
+                        
+                        # Handle custom response logic if provided
+                        custom_response = params.get('custom_response')
+                        if callable(custom_response):
+                            return custom_response(result, params)
+                        
+                        # Default response if no custom logic is applied
+                        return UniversalConnector.get_response(result)
                 except Exception as e:
                     error_message = str(e)
                     return UniversalConnector.get_response(
@@ -161,14 +172,32 @@ def odoo_method(model, method):
                             params.get('ids')
                         ).read(params.get('fields', []))
                         # Dynamically handle images in the result
-                        result = handle_images_in_result(result, params.get('fields', []))
+                        # result = handle_images_in_result(result, params.get('fields', []))
                     else:
                         # Handle custom method calls dynamically
                         result = getattr(request.env[model].sudo(), method)(**params)
+                    # Dynamically handle images in the result
+                    result = handle_images_in_result(result, params.get('fields', []))
 
-                    return request.make_response(
-                        json.dumps(result), headers={'Content-Type': 'application/json'}
-                    )
+                    # Call the after_execution function if it exists
+                    after_execution = params.get('after_execution')
+                    if callable(after_execution):
+                        result = after_execution(result, params)
+                        
+
+                    # Call the custom_response function if it exists
+                    custom_response = params.get('custom_response')
+                    if callable(custom_response):
+                        return custom_response(result, params)
+                    else:
+                        return request.make_response(
+                            json.dumps(result), 
+                            headers={'Content-Type': 'application/json'}
+                        )
+
+                    # return request.make_response(
+                    #     json.dumps(result), headers={'Content-Type': 'application/json'}
+                    # )
                 except (UserError, ValidationError, AccessError) as e:
                     error_message = str(e)
                     return request.make_response(
