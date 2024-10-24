@@ -1,125 +1,224 @@
-from .odoo_utils import odoo_request, authenticate, call_odoo
 import functools
-from rest_framework.response import Response
-from django.http import JsonResponse
+import json
+import base64
+
+try:
+    # Django imports
+    from rest_framework.response import Response
+    from django.http import JsonResponse
+    DJANGO_ENVIRONMENT = True
+except ImportError:
+    DJANGO_ENVIRONMENT = False
+
+# Handle Odoo-specific imports and exceptions
+if DJANGO_ENVIRONMENT:
+    from .odoo_utils import odoo_request, authenticate, call_odoo
+else:
+    try:
+        # Odoo imports
+        from odoo import http
+        from odoo.http import request
+        from odoo.exceptions import UserError, ValidationError, AccessError
+    except ImportError:
+        # Fallback: Define Odoo exceptions to avoid NameError in Django
+        class UserError(Exception):
+            """Fallback for Odoo UserError in non-Odoo environments."""
+            pass
+
+        class ValidationError(Exception):
+            """Fallback for Odoo ValidationError in non-Odoo environments."""
+            pass
+
+        class AccessError(Exception):
+            """Fallback for Odoo AccessError in non-Odoo environments."""
+            pass
+
+
+class UniversalConnector:
+    @staticmethod
+    def is_django():
+        return DJANGO_ENVIRONMENT
+
+    @staticmethod
+    def get_response(data, status=200):
+        if DJANGO_ENVIRONMENT:
+            return Response(data, status=status)
+        else:
+            return http.Response(json.dumps(data), status=status, content_type='application/json')
+
+    @staticmethod
+    def get_session(request):
+        if DJANGO_ENVIRONMENT:
+            if hasattr(request, 'COOKIES'):
+                return request.COOKIES.get('session_id')
+            elif hasattr(request, '_request'):
+                return request._request.COOKIES.get('session_id')
+        else:
+            return request.session.sid
+
+    @staticmethod
+    def set_cookie(response, key, value):
+        response.set_cookie(key, value)
 
 
 def odoo_auth(odoo_url, odoo_db):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, request, *args, **kwargs):
-            # First call to get credentials
-            result = func(self, request, *args, **kwargs)
+            if UniversalConnector.is_django():
+                # Django authentication logic
+                result = func(self, request, *args, **kwargs)
+                username = result.get('username')
+                password = result.get('password')
 
-            username = result.get('username')
-            password = result.get('password')
+                if not all([username, password]):
+                    return UniversalConnector.get_response(
+                        {"error": "Username and password are required."}, status=401
+                    )
 
-            if not all([username, password]):
-                return Response({"error": "Username and password are required."}, status=401)
+                auth_result = authenticate(
+                    odoo_url, odoo_db, username, password)
 
-            # Authenticate with Odoo
-            auth_result = authenticate(odoo_url, odoo_db, username, password)
+                if "error" in auth_result:
+                    return UniversalConnector.get_response(
+                        {"error": auth_result["error"]}, status=401
+                    )
 
-            if "error" in auth_result:
-                return Response({"error": auth_result["error"]}, status=401)
+                request.odoo_session = auth_result
 
-            # Store the authentication result
-            request.odoo_session = auth_result
+                success_response = {
+                    "message": "Authentication successful",
+                    "uid": auth_result['uid'],
+                }
 
-            # Prepare the success response
-            success_response = {
-                "message": "Authentication successful",
-                "uid": auth_result['uid'],
-                # Include any other non-sensitive information you want to return
-            }
+                response = UniversalConnector.get_response(
+                    success_response, status=200)
+                UniversalConnector.set_cookie(
+                    response, 'session_id', auth_result['session_id'])
 
-            # Create the response
-            response = Response(success_response, status=200)
+                for key, value in auth_result.get('cookies', {}).items():
+                    if key != 'session_id':
+                        UniversalConnector.set_cookie(response, key, value)
 
-            # Set the session ID cookie in the response
-            response.set_cookie('session_id', auth_result['session_id'])
-
-            # If there are other cookies, set them as well
-            for key, value in auth_result.get('cookies', {}).items():
-                if key != 'session_id':  # We've already set this one
-                    response.set_cookie(key, value)
-
-            return response
+                return response
+            else:
+                # Odoo authentication logic
+                return func(self, request, *args, **kwargs)
 
         return wrapper
     return decorator
 
 
-def odoo_method(model, method, call_type):
+def odoo_method(model, method):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, request, *args, **kwargs):
-            odoo_session = None
+            try:
+                if UniversalConnector.is_django():
+                    # Django logic
+                    odoo_session = UniversalConnector.get_session(request)
+                    if not odoo_session:
+                        return UniversalConnector.get_response(
+                            {"error": "Odoo session not provided."}, status=401
+                        )
 
-            if call_type == "inner":
-                # Keep this as is since it's working correctly
-                odoo_session = request.httprequest.cookies.get('session_id')
-            elif call_type == "external":
-                # Handle both Django HttpRequest and DRF Request for external calls
-                if hasattr(request, 'COOKIES'):
-                    # This is a regular Django request
-                    odoo_session = request.COOKIES.get('session_id')
-                    print("***COOKIES***", odoo_session)
-                elif hasattr(request, '_request'):
-                    # This is likely a DRF request
-                    odoo_session = request._request.COOKIES.get('session_id')
-                    print("***DRF***", odoo_session)
+                    request.odoo_session = odoo_session
+                    additional_params = func(self, request, *args, **kwargs)
+                    params = {**additional_params, **kwargs}
 
-            if odoo_session:
-                # Set the odoo_session as an attribute of request
-                request.odoo_session = odoo_session
-            else:
-                # Return an error response if session is not provided
-                return Response({"error": "Odoo session not provided."}, status=401)
+                    result = call_odoo(
+                        odoo_session, params['base_url'], model, method, params
+                    )
 
-            if not hasattr(request, 'odoo_session'):
-                # Return an error response if not authenticated
-                return Response({"error": "Not authenticated."}, status=401)
+                    result = handle_images_in_result(
+                        result, params.get('fields', []))
 
-            # Call the decorated function to get any additional parameters
-            additional_params = func(self, request, *args, **kwargs)
+                    after_execution = params.get('after_execution')
+                    if callable(after_execution):
+                        result = after_execution(result, params)
 
-            params = {**additional_params, **kwargs}
+                    custom_response = params.get('custom_response')
+                    if callable(custom_response):
+                        return custom_response(result, params)
 
-            # Call the Odoo method with the authenticated session
-            result = call_odoo(odoo_session,
-                               params['base_url'], model, method, params)
+                    return UniversalConnector.get_response(result)
+                else:
+                    # Odoo logic
+                    additional_params = func(self, *args, **kwargs)
+                    params = {**additional_params, **kwargs}
 
-            # Check if result is a dict and return as a JSON response
-            if isinstance(result, dict):
-                return Response(result)
+                    if method == 'create':
+                        result = request.env[model].sudo().create(params)
+                    elif method == 'write':
+                        result = request.env[model].sudo().browse(
+                            params.get('ids')
+                        ).write(params.get('values'))
+                    elif method == 'unlink':
+                        result = request.env[model].sudo().browse(
+                            params.get('ids')
+                        ).unlink()
+                    elif method == 'search_read':
+                        result = request.env[model].sudo().search_read(
+                            domain=params.get('domain', []),
+                            fields=params.get('fields', []),
+                            limit=params.get('limit', None)
+                        )
+                    elif method == 'read':
+                        result = request.env[model].sudo().browse(
+                            params.get('ids')
+                        ).read(params.get('fields', []))
+                    else:
+                        result = getattr(
+                            request.env[model].sudo(), method)(**params)
 
-            # Otherwise, return the result wrapped in JsonResponse for Django
-            # safe=False allows non-dict results
-            return JsonResponse(result, safe=False)
+                    result = handle_images_in_result(
+                        result, params.get('fields', []))
 
+                    after_execution = params.get('after_execution')
+                    if callable(after_execution):
+                        result = after_execution(result, params)
+
+                    custom_response = params.get('custom_response')
+                    if callable(custom_response):
+                        return custom_response(result, params)
+
+                    return request.make_response(
+                        json.dumps(result), headers={'Content-Type': 'application/json'}
+                    )
+            except (UserError, ValidationError, AccessError) as e:
+                return request.make_response(
+                    json.dumps({"error": str(e)}),
+                    headers={'Content-Type': 'application/json'},
+                    status=400
+                )
+            except Exception as e:
+                return request.make_response(
+                    json.dumps({"error": "An unexpected error occurred."}),
+                    headers={'Content-Type': 'application/json'},
+                    status=500
+                )
         return wrapper
     return decorator
 
 
-# common methods for odoo restful
-# search_read = functools.partial(odoo_method, method='search_read')
-# create = functools.partial(odoo_method, method='create')
-# write = functools.partial(odoo_method, method='write')
-# unlink = functools.partial(odoo_method, method='unlink')
+def handle_images_in_result(result, fields):
+    if isinstance(result, dict):
+        result = [result]  # Ensure result is iterable
 
-# common methods for odoo restful with call_type handling
-def search_read(model, call_type=None):
-    return odoo_method(model, method='search_read', call_type=call_type)
+    image_fields = [field for field in fields if 'image' in field]
 
+    for record in result:
+        for field in image_fields:
+            if field in record and record[field]:
+                # Convert binary image data to Base64 string
+                record[field] = base64.b64encode(record[field]).decode('utf-8')
 
-def create(model, call_type=None):
-    return odoo_method(model, method='create', call_type=call_type)
-
-
-def write(model, call_type=None):
-    return odoo_method(model, method='write', call_type=call_type)
+    return result
 
 
-def unlink(model, call_type=None):
-    return odoo_method(model, method='unlink', call_type=call_type)
+# Partial functions for common Odoo methods
+search_read = functools.partial(odoo_method, method='search_read')
+create = functools.partial(odoo_method, method='create')
+write = functools.partial(odoo_method, method='write')
+unlink = functools.partial(odoo_method, method='unlink')
+read = functools.partial(odoo_method, method='read')
