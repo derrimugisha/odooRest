@@ -10,12 +10,28 @@ try:
 except ImportError:
     DJANGO_ENVIRONMENT = False
 
+# Handle Odoo-specific imports and exceptions
 if DJANGO_ENVIRONMENT:
     from .odoo_utils import odoo_request, authenticate, call_odoo
 else:
-    # Odoo imports
-    from odoo import http
-    from odoo.http import request
+    try:
+        # Odoo imports
+        from odoo import http
+        from odoo.http import request
+        from odoo.exceptions import UserError, ValidationError, AccessError
+    except ImportError:
+        # Fallback: Define Odoo exceptions to avoid NameError in Django
+        class UserError(Exception):
+            """Fallback for Odoo UserError in non-Odoo environments."""
+            pass
+
+        class ValidationError(Exception):
+            """Fallback for Odoo ValidationError in non-Odoo environments."""
+            pass
+
+        class AccessError(Exception):
+            """Fallback for Odoo AccessError in non-Odoo environments."""
+            pass
 
 
 class UniversalConnector:
@@ -42,10 +58,7 @@ class UniversalConnector:
 
     @staticmethod
     def set_cookie(response, key, value):
-        if DJANGO_ENVIRONMENT:
-            response.set_cookie(key, value)
-        else:
-            response.set_cookie(key, value)
+        response.set_cookie(key, value)
 
 
 def odoo_auth(odoo_url, odoo_db):
@@ -59,13 +72,17 @@ def odoo_auth(odoo_url, odoo_db):
                 password = result.get('password')
 
                 if not all([username, password]):
-                    return UniversalConnector.get_response({"error": "Username and password are required."}, status=401)
+                    return UniversalConnector.get_response(
+                        {"error": "Username and password are required."}, status=401
+                    )
 
                 auth_result = authenticate(
                     odoo_url, odoo_db, username, password)
 
                 if "error" in auth_result:
-                    return UniversalConnector.get_response({"error": auth_result["error"]}, status=401)
+                    return UniversalConnector.get_response(
+                        {"error": auth_result["error"]}, status=401
+                    )
 
                 request.odoo_session = auth_result
 
@@ -91,66 +108,45 @@ def odoo_auth(odoo_url, odoo_db):
         return wrapper
     return decorator
 
-import functools
-import json
-from odoo.http import request
-from odoo.exceptions import UserError, ValidationError, AccessError
 
 def odoo_method(model, method):
     def decorator(func):
-        if DJANGO_ENVIRONMENT:
-            @functools.wraps(func)
-            def wrapper(self, request, *args, **kwargs):
-                try:
-                    if UniversalConnector.is_django():
-                        odoo_session = UniversalConnector.get_session(request)
-                        if not odoo_session:
-                            return UniversalConnector.get_response(
-                                {"error": "Odoo session not provided."}, status=401
-                            )
-
-                        request.odoo_session = odoo_session
-
-                        # Execute the wrapped function to get additional params
-                        additional_params = func(self, request, *args, **kwargs)
-                        params = {**additional_params, **kwargs}
-
-                        result = call_odoo(
-                            odoo_session, params['base_url'], model, method, params
+        @functools.wraps(func)
+        def wrapper(self, request, *args, **kwargs):
+            try:
+                if UniversalConnector.is_django():
+                    # Django logic
+                    odoo_session = UniversalConnector.get_session(request)
+                    if not odoo_session:
+                        return UniversalConnector.get_response(
+                            {"error": "Odoo session not provided."}, status=401
                         )
 
-                        # Dynamically handle images if any are present in the response
-                        if isinstance(result, dict):
-                            result = handle_images_in_result(result, params.get('fields', []))
-                            # return UniversalConnector.get_response(result)
-                        
-                        # Apply the after_execution function if provided
-                        after_execution = params.get('after_execution')
-                        if callable(after_execution):
-                            result = after_execution(result, params)
-                        
-                        # Handle custom response logic if provided
-                        custom_response = params.get('custom_response')
-                        if callable(custom_response):
-                            return custom_response(result, params)
-                        
-                        # Default response if no custom logic is applied
-                        return UniversalConnector.get_response(result)
-                except Exception as e:
-                    error_message = str(e)
-                    return UniversalConnector.get_response(
-                        {"error": error_message}, status=500
+                    request.odoo_session = odoo_session
+                    additional_params = func(self, request, *args, **kwargs)
+                    params = {**additional_params, **kwargs}
+
+                    result = call_odoo(
+                        odoo_session, params['base_url'], model, method, params
                     )
-            return wrapper
-        else:
-            @functools.wraps(func)
-            def wrapper(self, *args, **kwargs):
-                try:
-                    # Execute the wrapped function to get additional params
+
+                    result = handle_images_in_result(
+                        result, params.get('fields', []))
+
+                    after_execution = params.get('after_execution')
+                    if callable(after_execution):
+                        result = after_execution(result, params)
+
+                    custom_response = params.get('custom_response')
+                    if callable(custom_response):
+                        return custom_response(result, params)
+
+                    return UniversalConnector.get_response(result)
+                else:
+                    # Odoo logic
                     additional_params = func(self, *args, **kwargs)
                     params = {**additional_params, **kwargs}
 
-                    # Handle standard Odoo methods (create, write, unlink, search_read)
                     if method == 'create':
                         result = request.env[model].sudo().create(params)
                     elif method == 'write':
@@ -171,54 +167,41 @@ def odoo_method(model, method):
                         result = request.env[model].sudo().browse(
                             params.get('ids')
                         ).read(params.get('fields', []))
-                        # Dynamically handle images in the result
-                        # result = handle_images_in_result(result, params.get('fields', []))
                     else:
-                        # Handle custom method calls dynamically
-                        result = getattr(request.env[model].sudo(), method)(**params)
-                    # Dynamically handle images in the result
-                    result = handle_images_in_result(result, params.get('fields', []))
+                        result = getattr(
+                            request.env[model].sudo(), method)(**params)
 
-                    # Call the after_execution function if it exists
+                    result = handle_images_in_result(
+                        result, params.get('fields', []))
+
                     after_execution = params.get('after_execution')
                     if callable(after_execution):
                         result = after_execution(result, params)
-                        
 
-                    # Call the custom_response function if it exists
                     custom_response = params.get('custom_response')
                     if callable(custom_response):
                         return custom_response(result, params)
-                    else:
-                        return request.make_response(
-                            json.dumps(result), 
-                            headers={'Content-Type': 'application/json'}
-                        )
 
-                    # return request.make_response(
-                    #     json.dumps(result), headers={'Content-Type': 'application/json'}
-                    # )
-                except (UserError, ValidationError, AccessError) as e:
-                    error_message = str(e)
                     return request.make_response(
-                        json.dumps({"error": error_message}),
-                        headers={'Content-Type': 'application/json'},
-                        status=400
+                        json.dumps(result), headers={'Content-Type': 'application/json'}
                     )
-                except Exception as e:
-                    error_message = str(e)
-                    return request.make_response(
-                        json.dumps({"error": "An unexpected error occurred."}),
-                        headers={'Content-Type': 'application/json'},
-                        status=500
-                    )
-            return wrapper
+            except (UserError, ValidationError, AccessError) as e:
+                return request.make_response(
+                    json.dumps({"error": str(e)}),
+                    headers={'Content-Type': 'application/json'},
+                    status=400
+                )
+            except Exception as e:
+                return request.make_response(
+                    json.dumps({"error": "An unexpected error occurred."}),
+                    headers={'Content-Type': 'application/json'},
+                    status=500
+                )
+        return wrapper
     return decorator
 
+
 def handle_images_in_result(result, fields):
-    """
-    Encodes any image fields (like 'image_1920') in Base64, if those fields are present.
-    """
     if isinstance(result, dict):
         result = [result]  # Ensure result is iterable
 
@@ -232,10 +215,10 @@ def handle_images_in_result(result, fields):
 
     return result
 
-# common methods for odoo restful
+
+# Partial functions for common Odoo methods
 search_read = functools.partial(odoo_method, method='search_read')
 create = functools.partial(odoo_method, method='create')
 write = functools.partial(odoo_method, method='write')
 unlink = functools.partial(odoo_method, method='unlink')
 read = functools.partial(odoo_method, method='read')
-
