@@ -2,6 +2,7 @@ import functools
 import json
 import base64
 import traceback  # For detailed error messages
+from datetime import datetime, date
 
 try:
     from rest_framework.response import Response
@@ -26,6 +27,7 @@ else:
         from odoo import http
         from odoo.http import request
         from odoo.exceptions import UserError, ValidationError, AccessError
+        from odoo import models
     except ImportError:
         class UserError(Exception):
             pass
@@ -164,7 +166,34 @@ def odoo_method(model, method):
                     params = {**additional_params, **kwargs}
 
                     if method == 'create':
-                        result = request.env[model].sudo().create(params)
+                        record = request.env[model].sudo().create(params)
+                        # Get all fields available in the record
+                        fields = record._fields.keys()
+                        # Convert record to dictionary dynamically
+                        result = {
+                            'id': record.id
+                        }
+                        # Add all fields that exist in the original params
+                        for field in params.keys():
+                            if field in fields:
+                                result[field] = getattr(record, field)
+                            
+                        # Convert record values to JSON serializable format
+                        for key, value in result.items():
+                            if hasattr(value, '_name'):  # Handle many2one fields
+                                result[key] = {
+                                    'id': value.id,
+                                    'name': value.name if hasattr(value, 'name') else str(value.id)
+                                }
+                            elif isinstance(value, models.BaseModel):  # Handle other Odoo recordsets
+                                result[key] = [{'id': r.id, 'name': r.name if hasattr(r, 'name') else str(r.id)} 
+                                             for r in value]
+                            elif isinstance(value, datetime):  # Handle datetime
+                                result[key] = value.isoformat()
+                            elif isinstance(value, date):  # Handle date
+                                result[key] = value.isoformat()
+                            elif isinstance(value, (bytes, bytearray)):  # Handle binary fields
+                                result[key] = base64.b64encode(value).decode('utf-8')
                     elif method == 'write':
                         result = request.env[model].sudo().browse(params.get('ids')).write(params.get('values'))
                     elif method == 'unlink':
@@ -175,6 +204,7 @@ def odoo_method(model, method):
                             fields=params.get('fields', []),
                             limit=params.get('limit', None)
                         )
+                        
                     elif method == 'read':
                         result = request.env[model].sudo().browse(params.get('ids')).read(params.get('fields', []))
                     else:
