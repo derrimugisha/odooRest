@@ -1,6 +1,7 @@
 import functools
 import json
 import base64
+import traceback  # For detailed error messages
 
 try:
     # Django imports
@@ -13,14 +14,21 @@ except ImportError:
 # Handle Odoo-specific imports and exceptions
 if DJANGO_ENVIRONMENT:
     from .odoo_utils import odoo_request, authenticate, call_odoo
+
+    class UserError(Exception):
+        pass
+
+    class ValidationError(Exception):
+        pass
+
+    class AccessError(Exception):
+        pass
 else:
     try:
-        # Odoo imports
         from odoo import http
         from odoo.http import request
         from odoo.exceptions import UserError, ValidationError, AccessError
     except ImportError:
-        # Fallback for non-Odoo environments
         class UserError(Exception):
             pass
 
@@ -61,43 +69,52 @@ class UniversalConnector:
 def odoo_auth(odoo_url, odoo_db):
     def decorator(func):
         if DJANGO_ENVIRONMENT:
-            # Django wrapper: with request in the signature
             @functools.wraps(func)
             def wrapper(self, request, *args, **kwargs):
-                result = func(self, request, *args, **kwargs)
-                username = result.get('username')
-                password = result.get('password')
+                try:
+                    result = func(self, request, *args, **kwargs)
+                    username = result.get('username')
+                    password = result.get('password')
 
-                if not all([username, password]):
-                    return UniversalConnector.get_response(
-                        {"error": "Username and password are required."}, status=401
+                    if not all([username, password]):
+                        return UniversalConnector.get_response(
+                            {"error": "Username and password are required."}, status=401
+                        )
+
+                    auth_result = authenticate(odoo_url, odoo_db, username, password)
+
+                    if "error" in auth_result:
+                        return UniversalConnector.get_response(
+                            {"error": auth_result["error"]}, status=401
+                        )
+
+                    request.odoo_session = auth_result
+
+                    response = UniversalConnector.get_response(
+                        {"message": "Authentication successful", "uid": auth_result['uid']}, status=200
                     )
+                    UniversalConnector.set_cookie(response, 'session_id', auth_result['session_id'])
 
-                auth_result = authenticate(odoo_url, odoo_db, username, password)
+                    for key, value in auth_result.get('cookies', {}).items():
+                        if key != 'session_id':
+                            UniversalConnector.set_cookie(response, key, value)
 
-                if "error" in auth_result:
+                    return response
+                except Exception as e:
+                    print(traceback.format_exc())
                     return UniversalConnector.get_response(
-                        {"error": auth_result["error"]}, status=401
+                        {"error": str(e)}, status=500
                     )
-
-                request.odoo_session = auth_result
-
-                response = UniversalConnector.get_response(
-                    {"message": "Authentication successful", "uid": auth_result['uid']}, status=200
-                )
-                UniversalConnector.set_cookie(response, 'session_id', auth_result['session_id'])
-
-                for key, value in auth_result.get('cookies', {}).items():
-                    if key != 'session_id':
-                        UniversalConnector.set_cookie(response, key, value)
-
-                return response
         else:
-            # Odoo wrapper: without request in the signature
             @functools.wraps(func)
             def wrapper(self, *args, **kwargs):
-                return func(self, *args, **kwargs)
-
+                try:
+                    return func(self, *args, **kwargs)
+                except Exception as e:
+                    print(traceback.format_exc())
+                    return http.Response(
+                        json.dumps({"error": str(e)}), content_type='application/json', status=500
+                    )
         return wrapper
     return decorator
 
@@ -105,7 +122,6 @@ def odoo_auth(odoo_url, odoo_db):
 def odoo_method(model, method):
     def decorator(func):
         if DJANGO_ENVIRONMENT:
-            # Django wrapper: with request in the signature
             @functools.wraps(func)
             def wrapper(self, request, *args, **kwargs):
                 try:
@@ -115,8 +131,10 @@ def odoo_method(model, method):
                             {"error": "Odoo session not provided."}, status=401
                         )
 
-                    kwargs['odoo_session'] = odoo_session
+                    # Call the original function without passing `odoo_session` directly to it
                     additional_params = func(self, request, *args, **kwargs)
+
+                    # Prepare the parameters for the Odoo call
                     params = {**additional_params, **kwargs}
 
                     result = call_odoo(
@@ -125,26 +143,17 @@ def odoo_method(model, method):
 
                     result = handle_images_in_result(result, params.get('fields', []))
 
-                    after_execution = params.get('after_execution')
-                    if callable(after_execution):
-                        result = after_execution(result, params)
-
-                    custom_response = params.get('custom_response')
-                    if callable(custom_response):
-                        return custom_response(result, params)
-
                     return UniversalConnector.get_response(result)
-
                 except (UserError, ValidationError, AccessError) as e:
                     return UniversalConnector.get_response(
                         {"error": str(e)}, status=400
                     )
                 except Exception as e:
+                    print(traceback.format_exc())
                     return UniversalConnector.get_response(
-                        {"error": "An unexpected error occurred."}, status=500
+                        {"error": str(e)}, status=500
                     )
         else:
-            # Odoo wrapper: without request in the signature
             @functools.wraps(func)
             def wrapper(self, *args, **kwargs):
                 try:
@@ -170,29 +179,17 @@ def odoo_method(model, method):
 
                     result = handle_images_in_result(result, params.get('fields', []))
 
-                    after_execution = params.get('after_execution')
-                    if callable(after_execution):
-                        result = after_execution(result, params)
-
-                    custom_response = params.get('custom_response')
-                    if callable(custom_response):
-                        return custom_response(result, params)
-
-                    return request.make_response(
-                        json.dumps(result), headers={'Content-Type': 'application/json'}
+                    return http.Response(
+                        json.dumps(result), content_type='application/json'
                     )
-
                 except (UserError, ValidationError, AccessError) as e:
-                    return request.make_response(
-                        json.dumps({"error": str(e)}),
-                        headers={'Content-Type': 'application/json'},
-                        status=400
+                    return http.Response(
+                        json.dumps({"error": str(e)}), content_type='application/json', status=400
                     )
                 except Exception as e:
-                    return request.make_response(
-                        json.dumps({"error": "An unexpected error occurred."}),
-                        headers={'Content-Type': 'application/json'},
-                        status=500
+                    print(traceback.format_exc())
+                    return http.Response(
+                        json.dumps({"error": str(e)}), content_type='application/json', status=500
                     )
 
         return wrapper
@@ -201,7 +198,7 @@ def odoo_method(model, method):
 
 def handle_images_in_result(result, fields):
     if isinstance(result, dict):
-        result = [result]  # Ensure result is iterable
+        result = [result]
 
     image_fields = [field for field in fields if 'image' in field]
 
