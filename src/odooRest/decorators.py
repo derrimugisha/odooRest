@@ -4,14 +4,12 @@ import base64
 import traceback  # For detailed error messages
 
 try:
-    # Django imports
     from rest_framework.response import Response
     from django.http import JsonResponse
     DJANGO_ENVIRONMENT = True
 except ImportError:
     DJANGO_ENVIRONMENT = False
 
-# Handle Odoo-specific imports and exceptions
 if DJANGO_ENVIRONMENT:
     from .odoo_utils import odoo_request, authenticate, call_odoo
 
@@ -131,10 +129,7 @@ def odoo_method(model, method):
                             {"error": "Odoo session not provided."}, status=401
                         )
 
-                    # Call the original function without passing `odoo_session` directly to it
                     additional_params = func(self, request, *args, **kwargs)
-
-                    # Prepare the parameters for the Odoo call
                     params = {**additional_params, **kwargs}
 
                     result = call_odoo(
@@ -142,6 +137,14 @@ def odoo_method(model, method):
                     )
 
                     result = handle_images_in_result(result, params.get('fields', []))
+
+                    after_execution = params.get('after_execution')
+                    if callable(after_execution):
+                        result = after_execution(result, params)
+
+                    custom_response = params.get('custom_response')
+                    if callable(custom_response):
+                        return custom_response(result, params)
 
                     return UniversalConnector.get_response(result)
                 except (UserError, ValidationError, AccessError) as e:
@@ -179,6 +182,14 @@ def odoo_method(model, method):
 
                     result = handle_images_in_result(result, params.get('fields', []))
 
+                    after_execution = params.get('after_execution')
+                    if callable(after_execution):
+                        result = after_execution(result, params)
+
+                    custom_response = params.get('custom_response')
+                    if callable(custom_response):
+                        return custom_response(result, params)
+
                     return http.Response(
                         json.dumps(result), content_type='application/json'
                     )
@@ -210,7 +221,6 @@ def handle_images_in_result(result, fields):
     return result
 
 
-# Partial functions for common Odoo methods
 search_read = functools.partial(odoo_method, method='search_read')
 create = functools.partial(odoo_method, method='create')
 write = functools.partial(odoo_method, method='write')
