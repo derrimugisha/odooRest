@@ -19,12 +19,12 @@ setup(
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
-        "Framework :: Django",  # Added Django framework classifier
-        "Framework :: Django :: 4.2",  # Specify Django version support
+        "Framework :: Django",  
+        "Framework :: Django :: 4.2", 
         "Intended Audience :: Developers",
         "Topic :: Software Development :: Libraries :: Python Modules",
     ],
-    python_requires='>=3.8',  # Specify minimum Python version
+    python_requires='>=3.8', 
     keywords=['odoo', 'django', 'rest', 'api',
-              'integration'],  # Added relevant keywords
+              'integration'],  
 )
