@@ -93,11 +93,8 @@ def call_odoo(session_id, base_url, model, method, params):
         "params": {
             "model": model,
             "method": method,
-            "args": [params.get('domain', [])],
-            "kwargs": {
-                "fields": params.get('fields', []),
-                "limit": params.get('limit')
-            }
+            "args": params['args'],
+            "kwargs": params['kwargs']
         }
     }
 
