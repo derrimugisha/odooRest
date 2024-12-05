@@ -121,7 +121,7 @@ def odoo_auth(odoo_url, odoo_db):
     return decorator
 
 
-def odoo_method(model, method):
+def odoo_method(model, method, as_http_response=True):
     def decorator(func):
         if DJANGO_ENVIRONMENT:
             @functools.wraps(func)
@@ -129,85 +129,50 @@ def odoo_method(model, method):
                 try:
                     odoo_session = UniversalConnector.get_session(request)
                     if not odoo_session:
-                        return UniversalConnector.get_response(
-                            {"error": "Odoo session not provided."}, status=401
-                        )
+                        if as_http_response:
+                            return UniversalConnector.get_response(
+                                {"error": "Odoo session not provided."}, status=401
+                            )
+                        else:
+                            raise UserError("Odoo session not provided.")
 
                     # Get the parameters from the decorated function
                     additional_params = func(self, request, *args, **kwargs)
 
                     # Extract system parameters
                     base_url = additional_params.pop('base_url', None)
-                    custom_response = additional_params.pop(
-                        'custom_response', None)
-                    after_execution = additional_params.pop(
-                        'after_execution', None)
+                    custom_response = additional_params.pop('custom_response', None)
+                    after_execution = additional_params.pop('after_execution', None)
 
                     # Structure parameters based on the method
-                    if method == 'create':
-                        # First create the record
-                        create_params = {
-                            # Just the values dict as first arg
-                            'args': [additional_params],
-                            'kwargs': {}
+                    if method == 'search_read':
+                        params = {
+                            'args': [additional_params.get('domain', [])],
+                            'kwargs': {
+                                'fields': additional_params.get('fields', []),
+                                'limit': additional_params.get('limit'),
+                            },
                         }
-
-                        result = call_odoo(
-                            odoo_session, base_url, model, method, create_params
-                        )
-
-                        print("@@"*12)
-                        print(result)
-                        print("@@"*12)
-
-                        if result:
-                            # Then fetch the created record with all fields
-                            read_params = {
-                                'args': [[result]],  # ids as first arg
-                                'kwargs': {
-                                    # Get all fields that were sent
-                                    'fields': list(additional_params.keys())
-                                }
-                            }
-                            read_result = call_odoo(
-                                odoo_session, base_url, model, 'read', read_params
-                            )
-                            if read_result and isinstance(read_result, list):
-                                # Get the first (and only) record
-                                result = read_result[0]
+                    elif method == 'read':
+                        params = {
+                            'args': [additional_params.get('ids', [])],
+                            'kwargs': {'fields': additional_params.get('fields', [])},
+                        }
+                    elif method == 'write':
+                        params = {
+                            'args': [additional_params.get('ids', []), additional_params.get('values', {})],
+                            'kwargs': {},
+                        }
+                    elif method == 'unlink':
+                        params = {
+                            'args': [additional_params.get('ids', [])],
+                            'kwargs': {},
+                        }
                     else:
-                        if method == 'search_read':
-                            params = {
-                                'args': [additional_params.get('domain', [])],
-                                'kwargs': {
-                                    'fields': additional_params.get('fields', []),
-                                    'limit': additional_params.get('limit')
-                                }
-                            }
-                        elif method == 'read':
-                            params = {
-                                'args': [additional_params.get('ids', [])],
-                                'kwargs': {
-                                    'fields': additional_params.get('fields', [])
-                                }
-                            }
-                        elif method == 'write':
-                            params = {
-                                'args': [
-                                    additional_params.get('ids', []),
-                                    additional_params.get('values', {})
-                                ],
-                                'kwargs': {}
-                            }
-                        elif method == 'unlink':
-                            params = {
-                                'args': [additional_params.get('ids', [])],
-                                'kwargs': {}
-                            }
+                        params = additional_params
 
-                        result = call_odoo(
-                            odoo_session, base_url, model, method, params
-                        )
+                    # Call Odoo's RPC method
+                    result = call_odoo(odoo_session, base_url, model, method, params)
 
                     if callable(after_execution):
                         result = after_execution(result, params)
@@ -215,106 +180,72 @@ def odoo_method(model, method):
                     if callable(custom_response):
                         return custom_response(result, params)
 
-                    return UniversalConnector.get_response(result)
+                    if as_http_response:
+                        return UniversalConnector.get_response(result)
+                    else:
+                        return result
+
                 except (UserError, ValidationError, AccessError) as e:
-                    return UniversalConnector.get_response(
-                        {"error": str(e)}, status=400
-                    )
+                    if as_http_response:
+                        return UniversalConnector.get_response({"error": str(e)}, status=400)
+                    else:
+                        raise
                 except Exception as e:
-                    print(traceback.format_exc())
-                    return UniversalConnector.get_response(
-                        {"error": str(e)}, status=500
-                    )
+                    if as_http_response:
+                        return UniversalConnector.get_response({"error": str(e)}, status=500)
+                    else:
+                        raise
+
         else:
             @functools.wraps(func)
             def wrapper(self, *args, **kwargs):
                 try:
                     additional_params = func(self, *args, **kwargs)
                     params = {**additional_params, **kwargs}
-                    
+
                     env = request.env[model].sudo()
-                    
-                    if method == 'create':
-                        record = env.create(params)
-                        result = _prepare_record_data(record, params)
-                        
-                    elif method == 'write':
-                        records = env.browse(params.get('ids'))
-                        if not records.exists():
-                            raise ValidationError(f"No records found with ids {params.get('ids')}")
-                        result = records.write(params.get('values'))
-                        # Return updated record data
-                        if result:
-                            result = _prepare_record_data(records, params.get('fields', []))
-                            
-                    elif method == 'unlink':
-                        records = env.browse(params.get('ids'))
-                        if not records.exists():
-                            raise ValidationError(f"No records found with ids {params.get('ids')}")
-                        result = records.unlink()
-                        result = {'success': bool(result), 'deleted_ids': params.get('ids')}
-                        
-                    elif method == 'search_read':
-                        domain = params.get('domain', [])
-                        fields = params.get('fields', [])
-                        offset = params.get('offset', 0)
-                        limit = params.get('limit', None)
-                        order = params.get('order', None)
-                        
+
+                    if method == 'search_read':
                         result = env.search_read(
-                            domain=domain,
-                            fields=fields,
-                            offset=offset,
-                            limit=limit,
-                            order=order
+                            domain=params.get('domain', []),
+                            fields=params.get('fields', []),
+                            offset=params.get('offset', 0),
+                            limit=params.get('limit', None),
+                            order=params.get('order', None),
                         )
-                        # Add total count for pagination
-                        if limit:
-                            total_count = env.search_count(domain)
-                            result = {
-                                'records': result,
-                                'total_count': total_count,
-                                'limit': limit,
-                                'offset': offset
-                            }
-                            
                     elif method == 'read':
-                        records = env.browse(params.get('ids'))
+                        records = env.browse(params.get('ids', []))
                         if not records.exists():
                             raise ValidationError(f"No records found with ids {params.get('ids')}")
                         result = records.read(params.get('fields', []))
-                        
+                    elif method == 'write':
+                        records = env.browse(params.get('ids', []))
+                        if not records.exists():
+                            raise ValidationError(f"No records found with ids {params.get('ids')}")
+                        result = records.write(params.get('values', {}))
+                    elif method == 'unlink':
+                        records = env.browse(params.get('ids', []))
+                        if not records.exists():
+                            raise ValidationError(f"No records found with ids {params.get('ids')}")
+                        result = records.unlink()
                     else:
                         result = getattr(env, method)(**params)
 
-                    result = handle_images_in_result(result, params.get('fields', []))
-                    
-                    after_execution = params.get('after_execution')
-                    if callable(after_execution):
-                        result = after_execution(result, params)
-                        
-                    custom_response = params.get('custom_response')
-                    if callable(custom_response):
-                        return custom_response(result, params)
-                        
-                    return http.Response(
-                        json.dumps(result), 
-                        content_type='application/json'
-                    )
-                    
+                    if as_http_response:
+                        return http.Response(json.dumps(result), content_type='application/json')
+                    else:
+                        return result
+
                 except (UserError, ValidationError, AccessError) as e:
-                    return http.Response(
-                        json.dumps({"error": str(e)}), 
-                        content_type='application/json', 
-                        status=400
-                    )
+                    if as_http_response:
+                        return http.Response(json.dumps({"error": str(e)}), content_type='application/json', status=400)
+                    else:
+                        raise
                 except Exception as e:
-                    print(traceback.format_exc())
-                    return http.Response(
-                        json.dumps({"error": str(e)}), 
-                        content_type='application/json', 
-                        status=500
-                    )
+                    if as_http_response:
+                        return http.Response(json.dumps({"error": str(e)}), content_type='application/json', status=500)
+                    else:
+                        raise
 
         return wrapper
     return decorator
