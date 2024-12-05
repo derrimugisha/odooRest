@@ -331,6 +331,12 @@ def handle_images_in_result(result, fields):
             if field in record and record[field]:
                 record[field] = base64.b64encode(record[field]).decode('utf-8')
 
+    # You might want to add datetime handling here
+    for record in result:
+        for key, value in record.items():
+            if isinstance(value, (datetime, date)):
+                record[key] = value.isoformat()
+
     return result
 
 def _prepare_record_data(record, fields_or_params):
