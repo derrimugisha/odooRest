@@ -228,6 +228,13 @@ def odoo_method(model, method, as_http_response=True):
                         if not records.exists():
                             raise ValidationError(f"No records found with ids {params.get('ids')}")
                         result = records.unlink()
+                    elif method == 'create':
+                        record_data = env.create(params)
+                        print("***###***"*12)
+                        print(record_data)
+                        print("***###***"*12)
+                        fields_to_read = list(params.keys())
+                        result = record_data.read(fields_to_read)[0]
                     else:
                         result = getattr(env, method)(**params)
 
