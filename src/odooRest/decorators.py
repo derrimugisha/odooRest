@@ -218,11 +218,35 @@ def odoo_method(model, method, as_http_response=True):
                         if not records.exists():
                             raise ValidationError(f"No records found with ids {params.get('ids')}")
                         result = records.read(params.get('fields', []))
+                    # elif method == 'write':
+                    #     print("++++ ")
+                    #     print(model)
+                    #     print("++++ ")
+                    #     records = env.browse(params.get('ids', []))
+                    #     if not records.exists():
+                    #         raise ValidationError(f"No records found with ids {params.get('ids')}")
+                    #     result = records.write(params.get('values', {}))
                     elif method == 'write':
+                        print(f"Write method called for model: {model}")
+                        print(f"Params received from decorated function: {params}")
+
+                        # Get the records to update
                         records = env.browse(params.get('ids', []))
                         if not records.exists():
                             raise ValidationError(f"No records found with ids {params.get('ids')}")
+
+                        # Perform the write operation
                         result = records.write(params.get('values', {}))
+                        print(f"Write operation completed. Result: {result}")
+
+                        # Commit transaction to ensure persistence
+                        request.env.cr.commit()
+                        print(f"Database transaction committed for {params.get('ids')}")
+
+                        # Optionally, read back the updated record for verification
+                        updated_values = records.read(params['values'].keys())
+                        print(f"Updated record values: {updated_values}")
+                        return result
                     elif method == 'unlink':
                         records = env.browse(params.get('ids', []))
                         if not records.exists():
@@ -230,9 +254,6 @@ def odoo_method(model, method, as_http_response=True):
                         result = records.unlink()
                     elif method == 'create':
                         record_data = env.create(params)
-                        print("***###***"*12)
-                        print(record_data)
-                        print("***###***"*12)
                         fields_to_read = list(params.keys())
                         result = record_data.read(fields_to_read)[0]
                     else:
